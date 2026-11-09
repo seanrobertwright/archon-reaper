@@ -1,0 +1,18 @@
+{
+  "headline": "Of 10 runs on Oct 1, 4 completed, 3 failed and 2 were cancelled; one is still running. The implement workflow produced most of the failures.",
+  "observations": [
+    "44% of runs completed (57% if cancelled runs are left out). Three of the four completed runs recorded an outcome of succeeded.",
+    "Two of the three failures happened in implement: a gate that timed out after 120000 ms, and a record script that exited 1.",
+    "One cancelled run carries a script error from its load node, so it is a failure in practice.",
+    "Spend is $5.00, and $2.00 (40%) went to a run that failed."
+  ],
+  "recommendations": [
+    "Check the gate node's 120000 ms timeout in the implement workflow.",
+    "Look at why run r10 is still marked running; it has had no activity for a long time."
+  ],
+  "failure_notes": {
+    "Timed out: gate": "The gate script ran past its 120000 ms limit. Check whether the limit is too short for the checks it runs.",
+    "Workspace setup failed": "The run never started because git could not create its worktree. This is an infrastructure fault, not a workflow defect.",
+    "Script failed: record": "The record script exited with code 1 after the work finished; read the node output for the reason."
+  }
+}

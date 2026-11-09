@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+
+# generated output
+archon-report.html
+stats.json
+narrative.json
+examples/.sample.db
+tests/*.db
+tests/*.json
