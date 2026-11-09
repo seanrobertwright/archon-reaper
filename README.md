@@ -108,3 +108,7 @@ tests/                     unit tests and the synthetic database builder
 examples/                  sample report and an example narrative
 install.ps1, install.sh    link or copy the skill into ~/.claude/skills
 ```
+
+## License
+
+[MIT](LICENSE)
