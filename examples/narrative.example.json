@@ -14,5 +14,6 @@
     "Timed out: gate": "The gate script ran past its 120000 ms limit. Check whether the limit is too short for the checks it runs.",
     "Workspace setup failed": "The run never started because git could not create its worktree. This is an infrastructure fault, not a workflow defect.",
     "Script failed: record": "The record script exited with code 1 after the work finished; read the node output for the reason."
-  }
+  },
+  "version_note": "Archon went from 0.11.1 to 0.12.1 at 12:45 UTC. Six runs started on 0.11.1 and four on 0.12.1, which is too few on either side to say the upgrade changed the success rate."
 }

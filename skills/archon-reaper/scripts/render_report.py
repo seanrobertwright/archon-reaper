@@ -12,7 +12,8 @@ narrative.json (optional; written by Claude after reading stats.json):
   "headline":       "One or two sentences that sum up the period.",
   "observations":   ["3-6 short findings, most important first"],
   "recommendations":["0-4 concrete next steps"],
-  "failure_notes":  {"<exact category name from stats>": "One-two sentence diagnosis."}
+  "failure_notes":  {"<exact category name from stats>": "One-two sentence diagnosis."},
+  "version_note":   "Optional. One or two sentences comparing Archon versions."
 }
 """
 import argparse
@@ -75,6 +76,18 @@ def dlabel(iso, with_year=False):
     except (TypeError, ValueError):
         return iso or ""
     return d.strftime("%b ") + str(d.day) + ((", %d" % d.year) if with_year else "")
+
+
+def dtlabel(iso):
+    try:
+        d = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return iso or ""
+    return "%s %d, %d %s UTC" % (d.strftime("%b"), d.day, d.year, d.strftime("%H:%M"))
+
+
+def vlabel(v):
+    return "v%s" % v if v and v != "unknown" else "Unknown version"
 
 
 def stacked(ok, bad, cancel, other=0, cls="seg"):
@@ -153,9 +166,79 @@ def workflows(d):
             '<tbody>%s</tbody></table></div></section>' % "".join(rows))
 
 
+def versions(d, n):
+    """Per-version comparison. Shown only when the runs cover more than one Archon version
+    or the install has changed version; a single-version install gets the header and health tile."""
+    v = d.get("versions") or {}
+    bv, changes = v.get("by_version") or [], v.get("changes") or []
+    if len(bv) < 2 and not changes:
+        return ""
+    spans = {}
+    for seg in v.get("timeline") or []:
+        spans.setdefault(seg["version"], []).append("%s to %s" % (dlabel(seg["from"]), dlabel(seg["to"]) if seg.get("to") else "now"))
+    rows = []
+    for b in bv:
+        top = next(iter(b["failure_categories"].items()), None)
+        rows.append(
+            "<tr><td class='name'><b>%s</b><small>%s</small></td><td class='n'>%d</td><td class='bar'>%s</td>"
+            "<td class='n ok'>%d</td><td class='n fail'>%d</td><td class='n cancel'>%d</td><td class='n'>%s</td>"
+            "<td class='n'>%s</td><td class='n'>%s</td><td class='n'>%s</td><td>%s</td></tr>" % (
+                e(vlabel(b["version"])), e("; ".join(spans.get(b["version"], [])) or "no dated evidence"), b["runs"],
+                stacked(b["completed"], b["failed"], b["cancelled"], b["active"]), b["completed"], b["failed"], b["cancelled"],
+                pc(b["success_rate"]), dur(b["wall"]["mean"]), money(b["cost"]) if b["cost"] else "–",
+                money(b["cost_per_completed"]) if b["cost_per_completed"] else "–",
+                ("%s ×%d" % (e(top[0]), top[1])) if top else "–"))
+    table = ('<div class="scroll"><table><thead><tr><th>Version</th><th class="n">Runs</th><th>Outcome mix</th>'
+             '<th class="n">Done</th><th class="n">Failed</th><th class="n">Cancel</th><th class="n">Success</th>'
+             '<th class="n">Avg time</th><th class="n">Spend</th><th class="n">Per done run</th><th>Most common failure</th></tr></thead>'
+             '<tbody>%s</tbody></table></div>' % "".join(rows))
+
+    items = []
+    for c in changes:
+        detail = "%s; %s last seen %s" % (e(c["kind"]), e(vlabel(c["from"])), e(dtlabel(c["previous_last_seen"])))
+        if c["runs_in_gap"]:
+            detail += ". %d run%s started in the %s between the two sightings and %s counted under %s" % (
+                c["runs_in_gap"], "" if c["runs_in_gap"] == 1 else "s", dur(c["gap_s"]),
+                "is" if c["runs_in_gap"] == 1 else "are", e(vlabel(c["from"])))
+        items.append("<li><span><b>%s → %s</b><small>%s</small></span><b>%s</b></li>" % (
+            e(vlabel(c["from"])), e(vlabel(c["to"])), detail, e(dtlabel(c["at"]))))
+    changes_html = ('<div class="panel"><h3>Version changes</h3><ul class="plain">%s</ul></div>' % "".join(items)) if items else ""
+
+    # success by workflow, one column per version, for workflows that ran on more than one
+    cols = bv[-4:]
+    per = {b["version"]: {w["name"]: w for w in b["workflows"]} for b in cols}
+    names = [w["name"] for w in d["workflows"] if sum(1 for b in cols if w["name"] in per[b["version"]]) > 1]
+    matrix_html = ""
+    if names:
+        mrows = []
+        for name in names:
+            cells = []
+            for b in cols:
+                w = per[b["version"]].get(name)
+                cells.append("<td class='n'>%s</td>" % (
+                    "–" if not w else "%s <small>%d of %d</small>" % (pc(w["success_rate"]), w["completed"], w["finished"])))
+            mrows.append("<tr><td class='name'>%s</td>%s</tr>" % (wf_name(name), "".join(cells)))
+        matrix_html = ('<div class="panel"><h3>Success by workflow and version</h3><div class="scroll"><table><thead><tr><th>Workflow</th>%s</tr></thead>'
+                       '<tbody>%s</tbody></table></div><p class="hint">Completed runs out of finished runs. Workflows that ran on one version only are left out.</p></div>' % (
+                           "".join("<th class='n'>%s</th>" % e(vlabel(b["version"])) for b in cols), "".join(mrows)))
+
+    hints = ["Archon does not record a version on a run. Each run is assigned the version that dated evidence in the install "
+             "(the schema-version table, install and server files, log lines) shows was in use when the run started."]
+    if v.get("runs_spanning_change"):
+        hints.append("%d run%s started on one version and finished after a change; %s counted under the starting version." % (
+            v["runs_spanning_change"], "" if v["runs_spanning_change"] == 1 else "s", "it is" if v["runs_spanning_change"] == 1 else "they are"))
+    if v.get("unattributed_runs"):
+        hints.append("%d run%s started before the earliest version evidence." % (v["unattributed_runs"], "" if v["unattributed_runs"] == 1 else "s"))
+    note = '<p class="note">%s</p>' % e(n["version_note"]) if n and n.get("version_note") else ""
+    return ('<section id="versions"><h2>Archon versions</h2><p class="lede">How runs ended on each Archon version. '
+            'Versions differ in age and in the mix of workflows run on them, so read the comparison with that in mind.</p>%s%s'
+            '<div class="two">%s%s</div><p class="hint">%s</p></section>' % (note, table, changes_html, matrix_html, " ".join(e(h) for h in hints)))
+
+
 def failures(d, n):
     f, s = d["failures"], d["summary"]
     notes = (n or {}).get("failure_notes", {})
+    multi_version = len((d.get("versions") or {}).get("by_version") or []) > 1
     cards = []
     for c in f["categories"]:
         ex = "".join(
@@ -164,6 +247,8 @@ def failures(d, n):
             for x in c["examples"])
         chips = "".join("<span class='chip'>%s <b>%d</b></span>" % (e(k), v) for k, v in c["workflows"].items())
         nodes = "".join("<span class='chip mono'>%s <b>%d</b></span>" % (e(k), v) for k, v in c["nodes"].items())
+        if multi_version:
+            nodes += "".join("<span class='chip ver'>%s <b>%d</b></span>" % (e(vlabel(k)), v) for k, v in (c.get("versions") or {}).items())
         note = '<p class="note">%s</p>' % e(notes[c["category"]]) if notes.get(c["category"]) else ""
         cards.append(
             '<article class="fcard"><header><h3>%s</h3><span class="fcount">%d<small> run%s · %s of failures</small></span></header>%s'
@@ -280,10 +365,20 @@ def trend(d):
         segs = "".join('<i class="%s" style="height:%.2f%%"></i>' % (k, r[key] / mx * 100) for k, key in (("ok", "completed"), ("fail", "failed"), ("cancel", "cancelled"), ("other", "other")) if r[key])
         lab = dlabel(r["label"]) if (i % every == 0) else ""
         tip = "%s: %d run%s (%d completed, %d failed, %d cancelled)" % (dlabel(r["label"]), tot, "" if tot == 1 else "s", r["completed"], r["failed"], r["cancelled"])
-        cols.append('<div class="col" title="%s"><span class="cn">%s</span><div class="cs">%s</div><span class="cl">%s</span></div>' % (e(tip), tot or "", segs, e(lab)))
+        changed = r.get("version_change") or []
+        if changed:
+            tip += "; Archon changed to %s" % ", ".join(vlabel(x) for x in changed)
+        cols.append('<div class="col%s" title="%s"><span class="cn">%s</span><div class="cs">%s</div><span class="cl">%s</span></div>' % (
+            " vchange" if changed else "", e(tip), tot or "", segs, e(lab)))
+    marks = [(r["label"], x) for r in rows for x in (r.get("version_change") or [])]
+    unit = "week" if d["trend"]["bucket"] == "week" else "day"
+    mark_html = ""
+    if marks:
+        mark_html = '<p class="hint"><i class="sw vmark"></i>Outlined %s: Archon changed version (%s).</p>' % (
+            unit, e(", ".join("%s to %s" % (dlabel(lab), vlabel(x)) for lab, x in marks)))
     return ('<section id="trend"><h2>Activity over time</h2><p class="lede">Runs started per %s, split by how they ended. Tallest bar: %d.</p>'
-            '<div class="scroll"><div class="trend" style="min-width:%dpx">%s</div></div></section>' % (
-                "week" if d["trend"]["bucket"] == "week" else "day", mx, n * 22, "".join(cols)))
+            '<div class="scroll"><div class="trend" style="min-width:%dpx">%s</div></div>%s</section>' % (
+                unit, mx, n * 22, "".join(cols), mark_html))
 
 
 def projects(d):
@@ -311,9 +406,13 @@ def health(d):
         items.append(("Run logs", "%s files" % h["log_files"], "%s MB on disk" % h["log_mb"]))
     un = h.get("unfinished_runs") or []
     items.append(("Unfinished runs", str(len(un)), ("; ".join("%s %s idle %sh" % (u["workflow"], u["status"], u["idle_hours"]) for u in un[:3])) if un else "nothing stuck"))
-    inst = h.get("install") or {}
-    if inst.get("version"):
-        items.append(("Archon version", "v%s" % inst["version"], "%s project%s registered" % (h.get("codebases", "?"), "" if h.get("codebases") == 1 else "s")))
+    ver = d.get("versions") or {}
+    current = ver.get("current") or (h.get("install") or {}).get("version")
+    if current:
+        sub = "%s project%s registered" % (h.get("codebases", "?"), "" if h.get("codebases") == 1 else "s")
+        if ver.get("update_available"):
+            sub = "%s is available · %s" % (vlabel(ver["latest_available"]), sub)
+        items.append(("Archon version", vlabel(current), sub))
     cells = "".join('<div class="mini%s"><span class="kpi-l">%s</span><span class="mv sm">%s</span><span class="kpi-s">%s</span></div>' % (" warn" if (a == "Unfinished runs" and un) else "", e(a), e(b), e(c)) for a, b, c in items)
     return '<section id="health"><h2>Installation health</h2><div class="minis">%s</div></section>' % cells
 
@@ -329,7 +428,9 @@ def notes(d):
             'A run marked completed can still have an unrecorded outcome; the Completed tile says how many are verified.</li>'
             '<li><b>Total time</b> runs from start to finish and includes time a run sat waiting for approval or between a failure and a resume. '
             '<b>Hands-on time</b> subtracts those waits.</li>'
-            '<li><b>Failure groups</b> come from keyword rules on the recorded error text, so “Other” means no rule matched.</li></ul>'
+            '<li><b>Failure groups</b> come from keyword rules on the recorded error text, so “Other” means no rule matched.</li>'
+            '<li><b>Archon version</b> is not stored on a run. It is inferred from dated evidence in the install, and a run counts '
+            'under the version in use when it started.</li></ul>'
             '<p class="stamp">Window: %s. Generated %s from <span class="mono">%s</span>, opened read-only.</p></footer>' % (
                 e(win), e(datetime.fromisoformat(m["generated_at"]).strftime("%b %d, %Y %H:%M UTC")), e(m["db_path"])))
 
@@ -418,6 +519,12 @@ td.n.ok{color:var(--ok)}td.n.fail{color:var(--fail)}td.n.cancel{color:var(--canc
 .chips{display:flex;flex-wrap:wrap;gap:6px}
 .chip{font-size:12.5px;padding:2px 9px;border-radius:99px;background:var(--accent-soft);color:var(--ink)}
 .chip b{font-variant-numeric:tabular-nums;margin-left:3px}.chip.mono{background:var(--line-2)}
+.chip.ver{background:transparent;border:1px solid var(--line);color:var(--muted)}
+.plain li>span small{display:block;color:var(--muted);font-size:12.5px}
+.plain li>b{white-space:nowrap}
+td.n small{color:var(--muted);font-size:12px;margin-left:4px}
+.col.vchange .cs{outline:2px dashed var(--accent);outline-offset:3px}
+.sw.vmark{background:transparent;outline:2px dashed var(--accent);outline-offset:-1px}
 details summary{cursor:pointer;color:var(--accent);font-size:13px;font-weight:600}
 details summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .ex{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:10px}
@@ -450,13 +557,17 @@ def render(d, n):
     first = dlabel(m["first_run"], True) if m["first_run"] else "no runs"
     last = dlabel(m["last_run"], True) if m["last_run"] else ""
     span = "%s to %s · %d day%s" % (first, last, m["span_days"], "" if m["span_days"] == 1 else "s") if m["first_run"] else "no runs in this window"
+    ver = d.get("versions") or {}
+    seen = [b["version"] for b in ver.get("by_version") or [] if b["version"] != "unknown"] or ([ver["current"]] if ver.get("current") else [])
+    if seen:
+        span += " · Archon %s" % " → ".join(vlabel(x) for x in seen)
     head = ('<header class="head"><span class="eyebrow">Archon · run report</span><h1>Archon Run Report</h1>%s<span class="sub">%s</span></header>' % (
         ('<p class="headline">%s</p>' % e(n["headline"])) if n and n.get("headline") else "", e(span)))
     body = [head]
     if d["summary"]["total"] == 0:
         body.append('<p class="empty">No runs matched this window. Try a wider --since or no --project filter.</p>')
     else:
-        body += [kpis(d), takeaways(n), workflows(d), failures(d, n), durations(d), spend(d), human(d), trend(d), projects(d), health(d)]
+        body += [kpis(d), takeaways(n), workflows(d), versions(d, n), failures(d, n), durations(d), spend(d), human(d), trend(d), projects(d), health(d)]
     body.append(notes(d))
     return ('<title>Archon Run Report</title>\n<meta name="claude:viewport-fit-sides" content="cover">\n'
             '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Schibsted+Grotesk:wght@400;500;600;700&display=swap">\n'

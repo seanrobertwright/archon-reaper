@@ -6,6 +6,6 @@ __pycache__/
 archon-report.html
 stats.json
 narrative.json
-examples/.sample.db
+examples/.sample/
 tests/*.db
 tests/*.json
