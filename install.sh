@@ -1,16 +1,16 @@
 #!/usr/bin/env sh
-# Installs the archon-report skill for Claude Code by linking it into ~/.claude/skills.
+# Installs the archon-reaper skill for Claude Code by linking it into ~/.claude/skills.
 #
 #   ./install.sh              symlink: edits in this repo take effect immediately
 #   ./install.sh --copy       copy the files instead
-#   ./install.sh --force      replace an existing archon-report skill
+#   ./install.sh --force      replace an existing archon-reaper skill
 #   ./install.sh --uninstall  remove the installed skill
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
-source_dir="$here/skills/archon-report"
+source_dir="$here/skills/archon-reaper"
 skills_dir="${SKILLS_DIR:-$HOME/.claude/skills}"
-target="$skills_dir/archon-report"
+target="$skills_dir/archon-reaper"
 mode=link; force=0; uninstall=0
 
 for arg in "$@"; do

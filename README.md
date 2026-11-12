@@ -14,13 +14,16 @@ open it in a browser.
 | Summary | Runs, completed, failed, cancelled, success rate (with and without cancelled runs), spend, outcome bar |
 | Takeaways | Headline, observations and recommendations written by Claude from the numbers |
 | Workflows | Runs per workflow, outcome mix, success rate, average and median time, spend, cost per completed run |
+| Archon versions | Runs, outcomes, time and spend per Archon version; dated upgrades; success by workflow and version |
 | What went wrong | Failures grouped by cause with example errors and a diagnosis; nodes that fail most; cancellation reasons |
 | How long runs take | Average, median, p90, hands-on time vs total time, slowest runs, slowest nodes |
 | Spend and tokens | Total, per completed run, share wasted on failed or cancelled runs, by workflow and model, cache share |
 | Gates, resumes and loops | Approval decisions, typical wait, resumed runs, loop iterations |
-| Activity over time | Runs per day or week, split by outcome |
+| Activity over time | Runs per day or week, split by outcome, with version changes marked |
 | Projects and tools | Runs per project, tool call counts and failure rates |
-| Installation health | Database size, workspaces, unfinished runs, Archon version |
+| Installation health | Database size, workspaces, unfinished runs, installed Archon version and whether a newer one exists |
+
+The Archon versions section appears when the runs cover more than one version or the install has changed version.
 
 ## Install
 
@@ -41,8 +44,8 @@ Then ask Claude Code something like "make an Archon report" or "why do my Archon
 `generate.py` makes the same page with no commentary:
 
 ```sh
-python skills/archon-report/scripts/generate.py --since 30d --open
-python skills/archon-report/scripts/generate.py --project my-repo --out my-repo.html
+python skills/archon-reaper/scripts/generate.py --since 30d --open
+python skills/archon-reaper/scripts/generate.py --project my-repo --out my-repo.html
 ```
 
 | Option | Meaning |
@@ -66,11 +69,13 @@ into HTML (add `--standalone` for a page that opens from disk).
                                                   writes the narrative ─────────┘
 ```
 
-- The database is opened with SQLite `mode=ro`. Nothing in the Archon install is changed (a test checks this).
+- The database is opened with SQLite `mode=ro`. The collector also reads `install.json`, `server.json`,
+  `update-check.json`, the names of the `server/<version>` folders and the files in `logs/`, all beside the database.
+  Nothing in the Archon install is changed (a test checks that the database is byte-identical afterwards).
 - The collector verifies the tables and columns it needs and stops with a clear message if Archon changes its schema.
 - `hook_activity` events are skipped: they are about 87% of all stored events and carry nothing a report needs.
 - Claude's part is the narrative: it reads the example errors in each failure group and writes the diagnosis,
-  observations and recommendations. `skills/archon-report/SKILL.md` holds those instructions.
+  observations and recommendations. `skills/archon-reaper/SKILL.md` holds those instructions.
 
 ### Definitions
 
@@ -79,6 +84,12 @@ into HTML (add `--standalone` for a page that opens from disk).
 - **Total time** is start to finish. **Hands-on time** removes approval waits and the gap between a failure and a resume.
 - **Failure groups** come from keyword rules on the final error text (`classify_failure()` in `collect_stats.py`).
   The first failed node's `failure_kind` is only a fallback, because a run can fail one way, be resumed, and fail another.
+- **Archon version** is not stored on a run, so it is inferred. `version_observations()` in `collect_stats.py` collects
+  dated sightings of a version (the schema-version table, `install.json`, `server.json`, the `server/<version>` folders
+  and Archon's structured log lines), and a run counts under the version in use when it started. A change is dated at
+  the first sighting of the new version; the report says how many runs started in the gap before it. An install with
+  no such evidence reports its runs under "unknown". A build that reports the same number as a release cannot be told
+  apart from that release.
 - **Spend** is the cost the provider reported per agent node. On a subscription plan it is an API-equivalent figure, not
   a bill. Loop-group nodes are excluded because they repeat their children; script nodes report no cost.
 
@@ -91,15 +102,15 @@ into HTML (add `--standalone` for a page that opens from disk).
 ## Development
 
 ```sh
-python -m unittest discover -s tests -v      # 23 tests, standard library only
+python -m unittest discover -s tests -v      # standard library only
 python examples/make_sample.py               # regenerate examples/sample-report.html
 ```
 
-The tests build a small synthetic database (`tests/fixture.py`) that mirrors the tables the collector reads, so no real
-run data is needed or stored in the repo.
+The tests build a small synthetic Archon home (`tests/fixture.py`): a database that mirrors the tables the collector
+reads, plus the log and install files that date an upgrade. No real run data is needed or stored in the repo.
 
 ```
-skills/archon-report/
+skills/archon-reaper/
   SKILL.md                 instructions Claude follows
   scripts/collect_stats.py database -> stats.json
   scripts/render_report.py stats.json (+ narrative) -> HTML

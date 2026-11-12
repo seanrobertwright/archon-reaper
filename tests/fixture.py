@@ -1,11 +1,14 @@
 """Builds a small synthetic Archon database for tests and the sample report.
 
 The layout mirrors the tables and columns collect_stats.py reads. No real data is used.
+build() also writes logs/serve.log, install.json and update-check.json into the database's
+folder, so point it at a folder of its own.
 Run directly to write a fixture:  python tests/fixture.py <path-to-new.db>
 """
 import json
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 SCHEMA = """
@@ -19,9 +22,37 @@ create table remote_agent_workflow_events (id text primary key, workflow_run_id 
   event_type text, step_index integer, step_name text, data text, created_at text);
 create table remote_agent_conversations (id text primary key);
 create table remote_agent_isolation_environments (id text primary key, status text);
+create table remote_agent_schema_version (id integer primary key, created_app_version text, app_version text,
+  created_at text, applied_at text, schema_fingerprint text);
 """
 
 PACK = "demo-pack:implement"
+OLD_VERSION, NEW_VERSION, LATEST_VERSION = "0.11.1", "0.12.1", "0.13.0"
+
+
+def epoch_ms(hms):
+    """Milliseconds since the epoch for a UTC time of day on the fixture's date."""
+    h, m, s = (int(x) for x in hms.split(":"))
+    return int(datetime(2026, 10, 1, h, m, s, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def write_home(home):
+    """The files beside the database that date the upgrade from OLD_VERSION to NEW_VERSION:
+    last sign of the old version at 12:10, first sign of the new one at 12:45."""
+    logs = home / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    lines = [
+        {"level": 40, "time": epoch_ms("12:10:00"), "pid": 1, "module": "db.sqlite", "appVersion": OLD_VERSION, "msg": "db.check"},
+        {"level": 30, "time": epoch_ms("12:45:00"), "pid": 2, "module": "cli.serve", "version": NEW_VERSION,
+         "msg": "server_dist.download_started"},
+        # not Archon's own log lines: neither may count as a version sighting
+        {"time": epoch_ms("15:00:00"), "version": "9.9.9"},
+        {"level": 30, "time": epoch_ms("15:30:00"), "pid": 3, "module": "agent", "version": "8.8.8", "msg": "tool output"},
+    ]
+    text = "".join(json.dumps(x) + "\n" for x in lines) + 'agent said "appVersion":"7.7.7" in plain text\n'
+    (logs / "serve.log").write_text(text, encoding="utf-8")
+    (home / "install.json").write_text(json.dumps({"binary": "archon", "version": NEW_VERSION}), encoding="utf-8")
+    (home / "update-check.json").write_text(json.dumps({"latestVersion": LATEST_VERSION}), encoding="utf-8")
 
 
 def spend(cost, model="sonnet"):
@@ -43,12 +74,19 @@ def node_event(kind_event, nid, kind, ms, cost=None, model="sonnet", failure_kin
     return kind_event, nid, d
 
 
-def build(path):
+def build(path, versions=True):
+    """Write the database. With versions=True also record the version history: the
+    schema-version row in the database and the files written by write_home() beside it.
+    versions=False gives an install with no version evidence at all."""
     path = Path(path)
     if path.exists():
         path.unlink()
     con = sqlite3.connect(str(path))
     con.executescript(SCHEMA)
+    if versions:
+        write_home(path.parent)
+        con.execute("insert into remote_agent_schema_version values(1,?,?,?,?,?)",
+                    (OLD_VERSION, NEW_VERSION, "2026-09-30 08:00:00", "2026-10-01 20:00:00", "fixture"))
     con.executemany("insert into remote_agent_codebases(id,name) values(?,?)", [("c1", "acme/app"), ("c2", "acme/other")])
     con.executemany("insert into remote_agent_conversations(id) values(?)", [("v1",), ("v2",)])
     con.executemany("insert into remote_agent_isolation_environments(id,status) values(?,?)", [("e1", "active"), ("e2", "destroyed")])

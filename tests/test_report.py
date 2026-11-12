@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS = ROOT / "skills" / "archon-report" / "scripts"
+SCRIPTS = ROOT / "skills" / "archon-reaper" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -99,7 +99,87 @@ class CollectorTests(unittest.TestCase):
     def test_since_filter_can_empty_the_window(self):
         proc, out = run_collector(self.db, "--since", "2099-01-01")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(json.loads(out.read_text(encoding="utf-8"))["summary"]["total"], 0)
+        d = json.loads(out.read_text(encoding="utf-8"))
+        self.assertEqual(d["summary"]["total"], 0)
+        self.assertEqual(d["versions"]["by_version"], [])
+        self.assertEqual(d["versions"]["current"], fixture.NEW_VERSION)   # the history does not depend on the window
+
+    def test_runs_are_split_by_archon_version(self):
+        v = self.d["versions"]
+        self.assertEqual(v["current"], fixture.NEW_VERSION)
+        self.assertEqual(self.d["meta"]["archon_version"], fixture.NEW_VERSION)
+        self.assertEqual([t["version"] for t in v["timeline"]], [fixture.OLD_VERSION, fixture.NEW_VERSION])
+        got = {b["version"]: (b["runs"], b["completed"], b["failed"], b["cancelled"], b["active"]) for b in v["by_version"]}
+        # the upgrade is first seen at 12:45: r1-r6 started before it, r7-r10 after
+        self.assertEqual(got, {fixture.OLD_VERSION: (6, 2, 2, 2, 0), fixture.NEW_VERSION: (4, 2, 1, 0, 1)})
+        runs = {r["id"]: r["archon_version"] for r in self.d["runs"]}
+        self.assertEqual((runs["r4"], runs["r8"]), (fixture.OLD_VERSION, fixture.NEW_VERSION))
+        self.assertEqual(v["unattributed_runs"], 0)
+
+    def test_version_change_is_dated_and_its_gap_reported(self):
+        (c,) = self.d["versions"]["changes"]
+        self.assertEqual((c["from"], c["to"], c["kind"]), (fixture.OLD_VERSION, fixture.NEW_VERSION, "upgrade"))
+        self.assertEqual(c["at"], "2026-10-01T12:45:00+00:00")
+        self.assertEqual(c["previous_last_seen"], "2026-10-01T12:10:00+00:00")
+        self.assertEqual(c["runs_in_gap"], 1)                             # r4 started at 12:30
+        marked = [r["version_change"] for r in self.d["trend"]["rows"] if r["version_change"]]
+        self.assertEqual(marked, [[fixture.NEW_VERSION]])
+
+    def test_only_archon_log_lines_count_as_version_evidence(self):
+        versions = {t["version"] for t in self.d["versions"]["timeline"]}
+        self.assertEqual(versions & {"9.9.9", "8.8.8", "7.7.7"}, set())
+
+    def test_update_available_and_failure_versions(self):
+        v = self.d["versions"]
+        self.assertEqual((v["latest_available"], v["update_available"]), (fixture.LATEST_VERSION, True))
+        cats = {c["category"]: c["versions"] for c in self.d["failures"]["categories"]}
+        self.assertEqual(cats["Timed out: gate"], {fixture.OLD_VERSION: 1})
+        self.assertEqual(cats["Script failed: record"], {fixture.NEW_VERSION: 1})
+
+    def test_install_without_version_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = fixture.build(Path(tmp) / "archon.db", versions=False)
+            proc, out = run_collector(db)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            d = json.loads(out.read_text(encoding="utf-8"))
+        v = d["versions"]
+        self.assertEqual((v["current"], v["timeline"], v["changes"], v["unattributed_runs"]), (None, [], [], 10))
+        self.assertEqual([b["version"] for b in v["by_version"]], [collect_stats.UNKNOWN_VERSION])
+        html = render_report.render(d, None)
+        self.assertNotIn('id="versions"', html)
+
+
+class VersionTimelineTests(unittest.TestCase):
+    @staticmethod
+    def at(day, hour=0):
+        return collect_stats.parse_ts("2026-10-%02d %02d:00:00" % (day, hour))
+
+    def test_segments_and_lookup(self):
+        obs = [(self.at(5), "0.12.1", "logs"), (self.at(1), "0.11.1", "schema_version"),
+               (self.at(3), "0.11.1", "logs"), (self.at(9), "0.12.1", "server.json")]
+        segments, changes = collect_stats.build_timeline(obs)
+        self.assertEqual([(s["version"], s["from"], s["last_seen"]) for s in segments],
+                         [("0.11.1", self.at(1), self.at(3)), ("0.12.1", self.at(5), self.at(9))])
+        self.assertEqual(len(changes), 1)
+        self.assertIsNone(collect_stats.version_at(segments, self.at(1) - (self.at(3) - self.at(1))))  # before any evidence
+        self.assertIsNone(collect_stats.version_at(segments, None))
+        self.assertEqual(collect_stats.version_at(segments, self.at(4)), "0.11.1")   # in the gap: still the old version
+        self.assertEqual(collect_stats.version_at(segments, self.at(5)), "0.12.1")
+        self.assertEqual(collect_stats.version_at(segments, self.at(20)), "0.12.1")
+
+    def test_downgrade_opens_a_new_period(self):
+        obs = [(self.at(1), "0.11.1", "x"), (self.at(2), "0.12.1", "x"), (self.at(3), "0.11.1", "x")]
+        segments, changes = collect_stats.build_timeline(obs)
+        self.assertEqual([s["version"] for s in segments], ["0.11.1", "0.12.1", "0.11.1"])
+        self.assertEqual([c["kind"] for c in changes], ["upgrade", "downgrade"])
+        self.assertEqual(collect_stats.version_at(segments, self.at(3, 1)), "0.11.1")
+
+    def test_version_parsing_and_order(self):
+        self.assertEqual(collect_stats.norm_version("v0.12.1"), "0.12.1")
+        self.assertEqual(collect_stats.norm_version("0.13.0-rc.1"), "0.13.0-rc.1")
+        for bad in ("dev", "", None, 12, "1.2", "see 0.12.1 notes"):
+            self.assertIsNone(collect_stats.norm_version(bad), bad)
+        self.assertLess(collect_stats.version_key("0.9.0"), collect_stats.version_key("0.12.1"))
 
 
 class SchemaAndEdgeTests(unittest.TestCase):
@@ -140,7 +220,7 @@ class RendererTests(unittest.TestCase):
         assert proc.returncode == 0, proc.stderr
         cls.d = json.loads(out.read_text(encoding="utf-8"))
         cls.n = {"headline": "Headline <b>text</b>.", "observations": ["One."], "recommendations": ["Do it."],
-                 "failure_notes": {"Timed out: gate": "Gate is slow."}}
+                 "failure_notes": {"Timed out: gate": "Gate is slow."}, "version_note": "Newer <i>is</i> better."}
 
     @classmethod
     def tearDownClass(cls):
@@ -164,6 +244,33 @@ class RendererTests(unittest.TestCase):
         self.assertIn("Gate is slow.", html)
         self.assertIn("Do it.", html)
         self.assertIn("Headline &lt;b&gt;text&lt;/b&gt;.", html)
+
+    def test_versions_section(self):
+        html = render_report.render(self.d, self.n)
+        section = html[html.index('<section id="versions">'):]
+        section = section[:section.index("</section>")]
+        for text in ("v%s" % fixture.OLD_VERSION, "v%s" % fixture.NEW_VERSION, "Version changes",
+                     "Success by workflow and version", "Newer &lt;i&gt;is&lt;/i&gt; better."):
+            self.assertIn(text, section)
+        self.assertIn("Archon v%s → v%s" % (fixture.OLD_VERSION, fixture.NEW_VERSION), html)   # header
+        self.assertIn("v%s is available" % fixture.LATEST_VERSION, html)                        # health tile
+        self.assertIn("col vchange", html)                                                      # trend marker
+
+    def test_single_version_has_no_versions_section(self):
+        proc, out = run_collector(Path(self.tmp.name) / "archon.db", "--since", "2026-10-01T12:50:00")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        d = json.loads(out.read_text(encoding="utf-8"))
+        d["versions"]["changes"] = []          # an install that has only ever run one version
+        html = render_report.render(d, None)
+        self.assertNotIn('id="versions"', html)
+        self.assertIn("Archon v%s" % fixture.NEW_VERSION, html)
+
+    def test_stats_from_before_versions_still_render(self):
+        d = json.loads(json.dumps(self.d))
+        del d["versions"]
+        html = render_report.render(d, None)
+        self.assertNotIn('id="versions"', html)
+        self.assertIn("Installation health", html)
 
     def test_theme_tokens_for_both_modes(self):
         html = render_report.render(self.d, None)

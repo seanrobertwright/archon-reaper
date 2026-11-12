@@ -1,8 +1,8 @@
-# Installs the archon-report skill for Claude Code by linking it into ~/.claude/skills.
+# Installs the archon-reaper skill for Claude Code by linking it into ~/.claude/skills.
 #
 #   .\install.ps1            link (a directory junction): edits in this repo take effect immediately
 #   .\install.ps1 -Copy      copy the files instead
-#   .\install.ps1 -Force     replace an existing archon-report skill
+#   .\install.ps1 -Force     replace an existing archon-reaper skill
 #   .\install.ps1 -Uninstall remove the installed skill
 param(
     [switch]$Copy,
@@ -11,8 +11,8 @@ param(
     [string]$SkillsDir = (Join-Path $HOME ".claude\skills")
 )
 $ErrorActionPreference = "Stop"
-$source = Join-Path $PSScriptRoot "skills\archon-report"
-$target = Join-Path $SkillsDir "archon-report"
+$source = Join-Path $PSScriptRoot "skills\archon-reaper"
+$target = Join-Path $SkillsDir "archon-reaper"
 
 function Remove-Installed($path) {
     $item = Get-Item $path -Force
