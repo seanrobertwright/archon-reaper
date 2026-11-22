@@ -7,8 +7,28 @@
     "Spend is $5.00, and $2.00 (40%) went to a run that failed."
   ],
   "recommendations": [
-    "Check the gate node's 120000 ms timeout in the implement workflow.",
-    "Look at why run r10 is still marked running; it has had no activity for a long time."
+    {
+      "action": "Raise the gate node's 120000 ms timeout in the implement workflow, or make its checks faster.",
+      "reasoning": "The gate failed by running out of time, not by finding a problem, so the work it checked may have been fine. The timeout is set in the workflow, so the fix belongs there rather than in an instruction file.",
+      "evidence": "One implement run failed with 'Timed out: gate' after 120000 ms.",
+      "pros": [
+        "Stops a run being thrown away by a limit rather than a real failure."
+      ],
+      "cons": [
+        "One run is too few to know the limit is the cause; a hung check would also take longer to fail."
+      ]
+    },
+    {
+      "action": "Look at why run r10 is still marked running.",
+      "reasoning": "A run that stays running with no activity holds its worktree and hides whether it failed. Finding why it stopped reporting comes before any fix.",
+      "evidence": "Run r10 is unfinished, with no activity for a long time.",
+      "pros": [
+        "Frees the run's worktree and shows its real outcome."
+      ],
+      "cons": [
+        "It is one run; the cause may be a one-off crash with nothing to change."
+      ]
+    }
   ],
   "failure_notes": {
     "Timed out: gate": "The gate script ran past its 120000 ms limit. Check whether the limit is too short for the checks it runs.",

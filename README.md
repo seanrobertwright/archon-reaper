@@ -2,7 +2,9 @@
 
 A [Claude Code](https://claude.com/claude-code) skill that reports on how an [Archon](https://github.com/coleam00/Archon)
 installation is performing: how many runs completed, failed or were cancelled, why runs failed, how long they take,
-which workflows ran how often, and what it all cost. The result is a single, styled HTML page.
+which workflows ran how often, and what it all cost. The result is a single, styled HTML page. It ends with
+recommended changes and their pros and cons, a prompt you paste into a new Claude session to fix the development
+system behind the failures, and a KPI table that AI agents can read.
 
 See [`examples/sample-report.html`](examples/sample-report.html) for the layout. It is built from a synthetic database;
 open it in a browser.
@@ -13,6 +15,8 @@ open it in a browser.
 |---|---|
 | Summary | Runs, completed, failed, cancelled, success rate (with and without cancelled runs), spend, outcome bar |
 | Takeaways | Headline, observations and recommendations written by Claude from the numbers |
+| Recommended changes | Each recommendation with its reasoning, the evidence it rests on, and its pros and cons |
+| Improve your process | A prompt, with a Copy button, that has a new Claude session confirm the causes in your run logs and fix them in your CLAUDE.md, AGENTS.md, skills, plugins, hooks and Archon workflows |
 | Workflows | Runs per workflow, outcome mix, success rate, average and median time, spend, cost per completed run |
 | Archon versions | Runs, outcomes, time and spend per Archon version; dated upgrades; success by workflow and version |
 | What went wrong | Failures grouped by cause with example errors and a diagnosis; nodes that fail most; cancellation reasons |
@@ -22,6 +26,7 @@ open it in a browser.
 | Activity over time | Runs per day or week, split by outcome, with version changes marked |
 | Projects and tools | Runs per project, tool call counts and failure rates |
 | Installation health | Database size, workspaces, unfinished runs, installed Archon version and whether a newer one exists |
+| KPI summary | Every key figure with a stable `snake_case` key, raw value, unit and meaning, also embedded as JSON (`#kpi-summary-data`) for agents |
 
 The Archon versions section appears when the runs cover more than one version or the install has changed version.
 
@@ -55,9 +60,11 @@ python skills/archon-reaper/scripts/generate.py --project my-repo --out my-repo.
 | `--db` | Database path (default `~/.archon/archon.db`) |
 | `--narrative` | A `narrative.json` to include (see `examples/narrative.example.json`) |
 | `--out`, `--open` | Output file, and open it in a browser when done |
+| `--prompt` | Also write the improvement prompt to this Markdown file |
 
-The two steps are also available on their own: `collect_stats.py` writes JSON, and `render_report.py` turns that JSON
-into HTML (add `--standalone` for a page that opens from disk).
+The steps are also available on their own: `collect_stats.py` writes JSON, `render_report.py` turns that JSON
+into HTML (add `--standalone` for a page that opens from disk), and `improve_prompt.py` writes the improvement prompt
+(`python improve_prompt.py stats.json --narrative narrative.json --out prompt.md`).
 
 ## How it works
 
@@ -75,7 +82,10 @@ into HTML (add `--standalone` for a page that opens from disk).
 - The collector verifies the tables and columns it needs and stops with a clear message if Archon changes its schema.
 - `hook_activity` events are skipped: they are about 87% of all stored events and carry nothing a report needs.
 - Claude's part is the narrative: it reads the example errors in each failure group and writes the diagnosis,
-  observations and recommendations. `skills/archon-reaper/SKILL.md` holds those instructions.
+  observations and recommendations, each recommendation with its reasoning, evidence, pros and cons.
+  `skills/archon-reaper/SKILL.md` holds those instructions.
+- `improve_prompt.py` turns the evidence and the narrative into the improvement prompt. The same input always gives
+  the same prompt; the narrative's diagnoses go in as hypotheses for the receiving session to confirm.
 
 ### Definitions
 
@@ -95,7 +105,9 @@ into HTML (add `--standalone` for a page that opens from disk).
 
 ## Extending
 
-- **New metric:** add a key to the JSON in `collect_stats.py`, then a section function in `render_report.py`.
+- **New metric:** add a key to the JSON in `collect_stats.py`, then a section function in `render_report.py`. A figure
+  agents should read also gets a row in `kpi_summary()` in `improve_prompt.py`; keys are a contract
+  (`archon-reaper.kpi-summary/1`), so rename or remove one only with a new schema number.
 - **New failure category:** add a rule to `classify_failure()` and a test in `tests/test_report.py`.
 - **More detail than the database holds:** per-run JSONL logs are under `~/.archon/workspaces/<owner>/<repo>/logs/`.
 
@@ -114,7 +126,8 @@ skills/archon-reaper/
   SKILL.md                 instructions Claude follows
   scripts/collect_stats.py database -> stats.json
   scripts/render_report.py stats.json (+ narrative) -> HTML
-  scripts/generate.py      both steps, no Claude needed
+  scripts/improve_prompt.py stats.json (+ narrative) -> improvement prompt; also the KPI summary rows
+  scripts/generate.py      collect and render, no Claude needed
 tests/                     unit tests and the synthetic database builder
 examples/                  sample report and an example narrative
 install.ps1, install.sh    link or copy the skill into ~/.claude/skills

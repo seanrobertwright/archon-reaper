@@ -11,16 +11,29 @@ narrative.json (optional; written by Claude after reading stats.json):
 {
   "headline":       "One or two sentences that sum up the period.",
   "observations":   ["3-6 short findings, most important first"],
-  "recommendations":["0-4 concrete next steps"],
+  "recommendations":[{"action": "The change, in one sentence",
+                      "reasoning": "Why this change, and why at this layer rather than another",
+                      "evidence": "The counts, run ids, nodes or error text it rests on",
+                      "pros": ["What it gains"], "cons": ["What it costs or risks"]}],
   "failure_notes":  {"<exact category name from stats>": "One-two sentence diagnosis."},
   "version_note":   "Optional. One or two sentences comparing Archon versions."
 }
+A recommendation may also be a plain string, as in older narratives; it then shows without
+reasoning, pros or cons.
+
+The report ends its takeaways with "Improve your process": the prompt from improve_prompt.py,
+with a Copy button, for pasting into a new Claude session.
 """
 import argparse
 import json
+import sys
 from datetime import datetime
 from html import escape as _e
 from pathlib import Path
+
+# `python -I` does not put the script's own folder on sys.path, so add it for the sibling module.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import improve_prompt  # noqa: E402
 
 
 def e(x):
@@ -140,11 +153,107 @@ def takeaways(n):
     parts = []
     if n.get("observations"):
         parts.append('<div><h3>What stands out</h3><ul>%s</ul></div>' % "".join("<li>%s</li>" % e(x) for x in n["observations"]))
-    if n.get("recommendations"):
-        parts.append('<div><h3>Worth doing next</h3><ul>%s</ul></div>' % "".join("<li>%s</li>" % e(x) for x in n["recommendations"]))
+    recs = [r for r in (improve_prompt.recommendation(x) for x in n.get("recommendations") or []) if r["action"]]
+    if recs:
+        parts.append('<div><h3>Worth doing next</h3><ol>%s</ol></div>' % "".join("<li>%s</li>" % e(r["action"]) for r in recs))
     if not parts:
         return ""
     return '<section class="takeaways">%s</section>' % "".join(parts)
+
+
+def recommended_changes(n):
+    """Each recommendation with its reasoning, evidence, pros and cons, in the narrative's order.
+
+    Shown only when at least one recommendation carries more than its action; a list of plain
+    strings is already complete in the takeaways."""
+    if not n:
+        return ""
+    recs = [r for r in (improve_prompt.recommendation(x) for x in n.get("recommendations") or []) if r["action"]]
+    if not any(r["reasoning"] or r["evidence"] or r["pros"] or r["cons"] for r in recs):
+        return ""
+    cards = []
+    for i, r in enumerate(recs, 1):
+        body = ['<header><span class="rnum">%d</span><h3>%s</h3></header>' % (i, e(r["action"]))]
+        if r["reasoning"]:
+            body.append('<div class="why"><span class="lbl">Why</span><p>%s</p></div>' % e(r["reasoning"]))
+        if r["evidence"]:
+            body.append('<div class="why"><span class="lbl">Evidence</span><p class="evid">%s</p></div>' % e(r["evidence"]))
+        if r["pros"] or r["cons"]:
+            def side(cls, title, xs):
+                inner = "".join("<li>%s</li>" % e(x) for x in xs) or '<li class="none">None given</li>'
+                return '<div class="pc %s"><span class="lbl">%s</span><ul>%s</ul></div>' % (cls, title, inner)
+            body.append('<div class="pcs">%s%s</div>' % (side("pro", "Pros", r["pros"]), side("con", "Cons", r["cons"])))
+        cards.append('<article class="rcard">%s</article>' % "".join(body))
+    return ('<section id="recommendations"><h2>Recommended changes</h2>'
+            '<p class="lede">In order of impact, each with the reasoning behind it and what it gains and costs.</p>'
+            '<div class="rlist">%s</div></section>' % "".join(cards))
+
+
+COPY_SCRIPT = """<script>
+(function () {
+  var button = document.getElementById("improve-copy");
+  var text = document.getElementById("improve-prompt");
+  var status = document.getElementById("improve-status");
+  if (!button || !text) return;
+  function selectText() {
+    var range = document.createRange();
+    range.selectNodeContents(text);
+    var sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+  button.addEventListener("click", function () {
+    var done = function () { status.textContent = "Copied. Paste it into a new Claude session."; };
+    var fallback = function () { selectText(); status.textContent = "Copying is blocked here. The prompt is selected: press Ctrl+C or Cmd+C."; };
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text.textContent).then(done, fallback);
+      else fallback();
+    } catch (err) { fallback(); }
+  });
+})();
+</script>"""
+
+
+def kpi_table(d):
+    """The key figures at the end of the report, laid out for agents as well as people.
+
+    One row per figure with a stable key, the raw value, its unit and what it means, the same rows
+    as in the prompt. The rows are also embedded as JSON (id "kpi-summary-data") for agents that
+    parse the page."""
+    rows = improve_prompt.kpi_summary(d)
+
+    def shown(v):
+        if v is None:
+            return "null"
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        return str(v)
+
+    body = "".join('<tr><td><code>%s</code></td><td class="n">%s</td><td>%s</td><td>%s</td></tr>' % (
+        e(r["key"]), e(shown(r["value"])), e(r["unit"]), e(r["meaning"])) for r in rows)
+    # json.dumps output is safe inside a script element once "<" is escaped, so "</script>" cannot end it.
+    data = json.dumps({"schema": "archon-reaper.kpi-summary/1", "rows": rows}, ensure_ascii=False).replace("<", "\\u003c")
+    return ('<section id="kpi-summary"><h2>KPI summary</h2>'
+            '<p class="lede">Every key figure in one table with a stable key, a raw value and its unit, for people and for AI agents. '
+            'Ratios run from 0 to 1, money is in USD and time in seconds; null means the stats hold no figure. '
+            'The same rows are embedded in this page as JSON in the element with id <code>kpi-summary-data</code>.</p>'
+            '<div class="panel scroll"><table class="kpit"><thead><tr><th scope="col">Key</th><th scope="col" class="n">Value</th>'
+            '<th scope="col">Unit</th><th scope="col">Meaning</th></tr></thead><tbody>%s</tbody></table></div>'
+            '<script type="application/json" id="kpi-summary-data">%s</script></section>' % (body, data))
+
+
+def improve(d, n):
+    """The prompt that turns this report into changes to the user's development system."""
+    prompt = improve_prompt.build_prompt(d, n)
+    return ('<section id="improve"><h2>Improve your process</h2>'
+            '<p class="lede">Paste this prompt into a new Claude session on this machine. It carries the evidence above and asks '
+            'Claude to confirm the causes in your logs, propose a precise fix for each one with its reasoning, pros and cons, '
+            'and apply the fixes you approve to your instruction files, skills, plugins and Archon workflows.</p>'
+            '<div class="panel prompt"><div class="ptools"><button type="button" id="improve-copy">Copy prompt</button>'
+            '<span id="improve-status" class="pstatus" role="status" aria-live="polite"></span>'
+            '<span class="pmeta">%s characters</span></div>'
+            '<pre id="improve-prompt" tabindex="0" aria-label="Prompt to improve your development process">%s</pre></div>'
+            '</section>%s' % ("{:,}".format(len(prompt)), e(prompt), COPY_SCRIPT))
 
 
 def workflows(d):
@@ -480,7 +589,27 @@ section{min-width:0}
 .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px}
 .takeaways{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
 .takeaways>div{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:16px 18px}
-.takeaways ul{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:8px}
+.takeaways ul,.takeaways ol{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:8px}
+.rlist{display:flex;flex-direction:column;gap:12px}
+.rcard{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:16px 18px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.rcard header{display:flex;gap:12px;align-items:baseline}
+.rcard h3{margin:0;color:var(--ink);font-size:16px;text-transform:none;letter-spacing:0;font-weight:650;text-wrap:balance}
+.rnum{flex:none;font-family:var(--font-mono);font-size:12px;color:var(--accent);border:1px solid var(--line);border-radius:99px;min-width:24px;height:24px;display:inline-grid;place-items:center;font-variant-numeric:tabular-nums}
+.lbl{display:block;font-size:11.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);font-weight:600;margin-bottom:3px}
+.why p{margin:0;max-width:80ch;text-wrap:pretty}.why .evid{color:var(--muted);font-size:13.5px;overflow-wrap:anywhere}
+.pcs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.pc{border-radius:4px;padding:10px 12px;min-width:0}.pc ul{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px}
+.pc.pro{background:var(--ok-soft)}.pc.pro .lbl{color:var(--ok)}.pc.con{background:var(--fail-soft)}.pc.con .lbl{color:var(--fail)}
+.pc li.none{list-style:none;margin-left:-18px;color:var(--muted)}
+.prompt{display:flex;flex-direction:column;gap:10px}
+.ptools{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.ptools button{font:inherit;font-weight:600;font-size:14px;padding:7px 14px;border-radius:5px;border:1px solid var(--accent);background:var(--accent);color:var(--surface);cursor:pointer}
+.ptools button:hover{filter:brightness(1.08)}.ptools button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.pstatus{font-size:13px;color:var(--ok)}.pmeta{margin-left:auto;font-size:12.5px;color:var(--muted);font-family:var(--font-mono)}
+.prompt pre{margin:0;max-height:440px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--font-mono);font-size:12.5px;line-height:1.55;background:var(--surface-2);border:1px solid var(--line-2);border-radius:4px;padding:12px 14px}
+.prompt pre:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.kpit td{vertical-align:top}.kpit td code{white-space:nowrap}.kpit td.n{font-family:var(--font-mono);font-size:13px}
+.kpit td:last-child{color:var(--muted);min-width:220px}
 .panel{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:16px 18px;min-width:0}
 .two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:12px}
 .two:first-child{margin-top:0}
@@ -544,7 +673,7 @@ footer ul{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:6px;
 a{color:var(--accent)}
 @media (max-width:860px){
   .kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
-  .takeaways,.two,.fgrid{grid-template-columns:minmax(0,1fr)}
+  .takeaways,.two,.fgrid,.pcs{grid-template-columns:minmax(0,1fr)}
   .minis,.minis.five{grid-template-columns:repeat(2,minmax(0,1fr))}
   .hb{grid-template-columns:1fr auto}.hb-t{grid-column:1/-1;order:3}
 }
@@ -567,7 +696,8 @@ def render(d, n):
     if d["summary"]["total"] == 0:
         body.append('<p class="empty">No runs matched this window. Try a wider --since or no --project filter.</p>')
     else:
-        body += [kpis(d), takeaways(n), workflows(d), versions(d, n), failures(d, n), durations(d), spend(d), human(d), trend(d), projects(d), health(d)]
+        body += [kpis(d), takeaways(n), recommended_changes(n), improve(d, n), workflows(d), versions(d, n), failures(d, n),
+                 durations(d), spend(d), human(d), trend(d), projects(d), health(d), kpi_table(d)]
     body.append(notes(d))
     return ('<title>Archon Run Report</title>\n<meta name="claude:viewport-fit-sides" content="cover">\n'
             '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Schibsted+Grotesk:wght@400;500;600;700&display=swap">\n'

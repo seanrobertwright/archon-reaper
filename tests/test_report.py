@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import collect_stats  # noqa: E402
 import fixture  # noqa: E402
+import improve_prompt  # noqa: E402
 import render_report  # noqa: E402
 
 
@@ -300,6 +301,144 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(render_report.dur(None), "–")
         self.assertEqual(render_report.money(4.8), "$4.80")
         self.assertEqual(render_report.pc(0.5357), "54%")
+
+    def test_recommendations_with_reasoning_pros_and_cons(self):
+        n = dict(self.n, recommendations=[
+            {"action": "Raise the gate <timeout>.", "reasoning": "It times out at 120000ms.", "evidence": "3 runs.",
+             "pros": ["Fewer reruns."], "cons": ["Slower <failure>."]},
+            "A plain step."])
+        html = render_report.render(self.d, n)
+        section = html[html.index('<section id="recommendations">'):]
+        section = section[:section.index("</section>")]
+        for text in ("Raise the gate &lt;timeout&gt;.", "It times out at 120000ms.", "3 runs.", "Fewer reruns.",
+                     "Slower &lt;failure&gt;.", "Pros", "Cons", "A plain step."):
+            self.assertIn(text, section)
+        self.assertNotIn("<timeout>", html)
+
+    def test_plain_recommendations_show_no_cards(self):
+        html = render_report.render(self.d, self.n)
+        self.assertIn("Do it.", html)
+        self.assertNotIn('id="recommendations"', html)
+
+    def test_improve_section_has_the_prompt_and_a_copy_button(self):
+        html = render_report.render(self.d, self.n)
+        section = html[html.index('<section id="improve">'):]
+        section = section[:section.index("</section>")]
+        self.assertIn('id="improve-copy"', section)
+        self.assertIn("Improve my development process", section)
+        self.assertIn("navigator.clipboard.writeText", html)
+        # The prompt quotes error text; it must arrive escaped inside the <pre>.
+        self.assertNotIn("<script>alert(1)</script>", html)
+
+    def test_kpi_table_is_last_and_its_json_matches(self):
+        html = render_report.render(self.d, self.n)
+        self.assertLess(html.index('id="health"') if 'id="health"' in html else html.index("Installation health"),
+                        html.index('<section id="kpi-summary">'))
+        m = re.search(r'<script type="application/json" id="kpi-summary-data">(.*?)</script>', html, re.S)
+        data = json.loads(m.group(1))
+        self.assertEqual(data["schema"], "archon-reaper.kpi-summary/1")
+        self.assertEqual(data["rows"], json.loads(json.dumps(collect_free_rows(self.d))))
+        keys = [r["key"] for r in data["rows"]]
+        self.assertEqual(len(keys), len(set(keys)))
+        for key in ("runs_total", "success_rate", "spend_total_usd", "top_failing_node", "archon_version_current"):
+            self.assertIn("<code>%s</code>" % key, html)
+
+    def test_renderer_runs_isolated(self):
+        # `python -I` leaves the script's folder off sys.path; the renderer must still find improve_prompt.
+        stats = Path(self.tmp.name) / "iso.json"
+        stats.write_text(json.dumps(self.d), encoding="utf-8")
+        out = Path(self.tmp.name) / "iso.html"
+        proc = subprocess.run([sys.executable, "-I", str(SCRIPTS / "render_report.py"), str(stats), str(out)],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('id="kpi-summary"', out.read_text(encoding="utf-8"))
+
+
+def collect_free_rows(d):
+    """kpi_summary rows, through the module the renderer uses."""
+    return improve_prompt.kpi_summary(d)
+
+
+class ImprovePromptTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        db = fixture.build(Path(cls.tmp.name) / "archon.db")
+        proc, out = run_collector(db)
+        assert proc.returncode == 0, proc.stderr
+        cls.d = json.loads(out.read_text(encoding="utf-8"))
+        cls.n = {"headline": "A short period.", "failure_notes": {"Timed out: gate": "The gate's timeout is too short."},
+                 "recommendations": [{"action": "Raise the gate timeout.", "reasoning": "Every failure is a timeout.",
+                                      "evidence": "Timed out after 120000ms.", "pros": ["Fewer reruns."],
+                                      "cons": ["A hung gate takes longer to fail."]}]}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_prompt_carries_brief_evidence_method_and_rules(self):
+        p = improve_prompt.build_prompt(self.d, self.n)
+        for text in ("# Improve my development process", "## The evidence", "### Failure groups, costliest first",
+                     "### Nodes that fail most", "### KPI summary", "## How to work", "## Rules",
+                     "archon validate workflows", "AGENTS.md", "CLAUDE.md", "wait for my approval"):
+            self.assertIn(text, p)
+
+    def test_prompt_quotes_examples_with_run_ids_and_the_reports_diagnoses(self):
+        p = improve_prompt.build_prompt(self.d, self.n)
+        ex = self.d["failures"]["categories"][0]["examples"][0]
+        self.assertIn("Run `%s`" % ex["run"], p)
+        self.assertIn("a hypothesis to confirm: The gate's timeout is too short.", p)
+
+    def test_prompt_carries_reasoning_pros_and_cons(self):
+        p = improve_prompt.build_prompt(self.d, self.n)
+        for text in ("1. Raise the gate timeout.", "- Why: Every failure is a timeout.", "- Evidence: Timed out after 120000ms.",
+                     "- Pro: Fewer reruns.", "- Con: A hung gate takes longer to fail."):
+            self.assertIn(text, p)
+
+    def test_prompt_without_a_narrative(self):
+        p = improve_prompt.build_prompt(self.d)
+        self.assertNotIn("Summary from the report", p)
+        self.assertNotIn("recommendations, as starting points", p)
+        self.assertIn("## How to work", p)
+
+    def test_prompt_is_deterministic_and_clips_long_messages(self):
+        d = json.loads(json.dumps(self.d))
+        d["failures"]["categories"][0]["examples"][0]["message"] = "x" * 5000
+        p = improve_prompt.build_prompt(d, self.n)
+        self.assertEqual(p, improve_prompt.build_prompt(d, self.n))
+        self.assertNotIn("x" * (improve_prompt.MAX_MESSAGE + 1), p)
+
+    def test_recommendation_accepts_strings_objects_and_junk(self):
+        self.assertEqual(improve_prompt.recommendation("Do it.")["action"], "Do it.")
+        r = improve_prompt.recommendation({"action": " A ", "pros": "one pro", "cons": ["", "a con", 3]})
+        self.assertEqual((r["action"], r["pros"], r["cons"]), ("A", ["one pro"], ["a con"]))
+        self.assertEqual(improve_prompt.recommendation(42)["action"], "")
+
+    def test_kpi_summary_values_and_units(self):
+        rows = {r["key"]: r for r in improve_prompt.kpi_summary(self.d)}
+        s = self.d["summary"]
+        self.assertEqual(rows["runs_total"]["value"], s["total"])
+        self.assertEqual(rows["success_rate"]["value"], round(s["success_rate"], 4))
+        self.assertEqual(rows["success_rate"]["unit"], "ratio")
+        self.assertEqual(rows["spend_total_usd"]["unit"], "USD")
+        self.assertIsInstance(rows["duration_completed_median_s"]["value"], (int, type(None)))
+        self.assertTrue(all(r["meaning"] for r in rows.values()))
+
+    def test_kpi_summary_survives_missing_sections(self):
+        d = json.loads(json.dumps(self.d))
+        for key in ("versions", "health", "spend", "durations"):
+            del d[key]
+        rows = {r["key"]: r["value"] for r in improve_prompt.kpi_summary(d)}
+        self.assertIsNone(rows["spend_total_usd"])
+        self.assertIsNone(rows["archon_version_current"])
+
+    def test_cli_writes_the_prompt(self):
+        stats = Path(self.tmp.name) / "stats.json"
+        stats.write_text(json.dumps(self.d), encoding="utf-8")
+        out = Path(self.tmp.name) / "prompt.md"
+        subprocess.run([sys.executable, "-I", str(SCRIPTS / "improve_prompt.py"), str(stats), "--out", str(out)],
+                       check=True, capture_output=True)
+        self.assertTrue(out.read_text(encoding="utf-8").startswith("# Improve my development process"))
 
 
 if __name__ == "__main__":

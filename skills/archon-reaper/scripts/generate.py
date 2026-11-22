@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """One-step report without Claude: collect statistics, then render a standalone HTML file.
 
-    python generate.py [--out report.html] [--narrative narrative.json] [--open]
+    python generate.py [--out report.html] [--narrative narrative.json] [--prompt prompt.md] [--open]
                        [--db PATH] [--since 30d] [--project SUBSTR]
 
 The filters are passed to collect_stats.py. The page is rendered with --standalone so it opens
 straight from disk. Without --narrative there is no headline, takeaways or failure notes; that
-commentary is what the Claude skill adds.
+commentary is what the Claude skill adds. --prompt also writes the improvement prompt to a Markdown file;
+the report carries the same prompt in its "Improve your process" section.
 """
 import argparse
 import subprocess
@@ -22,6 +23,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default="archon-report.html")
     ap.add_argument("--narrative")
+    ap.add_argument("--prompt", help="also write the improvement prompt to this Markdown file")
     ap.add_argument("--open", action="store_true", help="open the finished report in the default browser")
     ap.add_argument("--db")
     ap.add_argument("--since")
@@ -39,6 +41,11 @@ def main():
         if a.narrative:
             cmd += ["--narrative", a.narrative]
         subprocess.run(cmd, check=True)
+        if a.prompt:
+            cmd = [sys.executable, "-I", str(HERE / "improve_prompt.py"), str(stats), "--out", a.prompt]
+            if a.narrative:
+                cmd += ["--narrative", a.narrative]
+            subprocess.run(cmd, check=True)
 
     if a.open:
         webbrowser.open(Path(a.out).resolve().as_uri())
