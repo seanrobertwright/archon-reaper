@@ -1,6 +1,6 @@
 ---
 name: archon-reaper
-description: Build an HTML report on how an Archon installation is performing. It covers run counts (completed, failed, cancelled), success rate, a grouped summary of what went wrong, average duration, runs per workflow, results per Archon version across upgrades, spend, approval waits and install health. Use when the user asks for an Archon report, stats, metrics, run history, "how are my workflows doing", "why do my runs fail", or "what has Archon cost me". NOT for inspecting or controlling a single run (use archon-cli).
+description: Build an HTML report on how an Archon installation is performing. It covers run counts (completed, failed, cancelled), success rate, a grouped summary of what went wrong, average duration, runs per workflow, results per Archon version across upgrades, spend, approval waits and install health, recommended changes with their reasoning, pros and cons, a copy-paste prompt that has a Claude session fix the development system behind the failures, and a KPI summary table for agents. Use when the user asks for an Archon report, stats, metrics, run history, "how are my workflows doing", "why do my runs fail", or "what has Archon cost me". NOT for inspecting or controlling a single run (use archon-cli).
 ---
 
 # Archon Report
@@ -29,7 +29,15 @@ Two scripts do the numbers and the layout; you add the judgment (the narrative).
    {
      "headline": "One or two plain sentences: how the period went.",
      "observations": ["3-6 findings, most important first, each with a number"],
-     "recommendations": ["0-4 concrete next steps tied to evidence"],
+     "recommendations": [
+       {
+         "action": "The change, in one sentence: what to change and where.",
+         "reasoning": "Why this change, and why at this layer (workflow, instruction file, skill, hook or check, environment) rather than another.",
+         "evidence": "The counts, node names, run ids or error text it rests on.",
+         "pros": ["What it gains, with a number where there is one"],
+         "cons": ["What it costs or risks: spend, maintenance, false alarms, reach"]
+       }
+     ],
      "failure_notes": {"<exact category name>": "One or two sentences on the likely cause."},
      "version_note": "One or two sentences comparing Archon versions. Omit when the runs cover one version."
    }
@@ -54,13 +62,22 @@ Two scripts do the numbers and the layout; you add the judgment (the narrative).
      `versions.runs_spanning_change` and `versions.unattributed_runs` when they are large enough to move a comparison.
    - If `versions.update_available` is true, say which version is installed and which is available.
    - Spend is provider-reported and may be an API-equivalent figure. Say "spend", not "bill".
+   - Give 0 to 4 recommendations, ordered by impact (spend and runs lost, then recurrence). Each one fixes a cause,
+     not a message. Its reasoning says why that layer owns the fix: a workflow defect is fixed in the workflow, an
+     invariant needs a hook, gate or check rather than a sentence in CLAUDE.md, and an environment fault needs a
+     preflight check or a cleanup. Give at least one pro and one con, each concrete: a con names a real cost or risk,
+     such as reach across projects, maintenance, a check that can block good runs, or a figure too thin to trust.
    - Plain sentences. No filler, no hedging stacks.
 
-3. **Render.**
+3. **Render**, and write the improvement prompt beside the report.
 
    ```bash
    python -I ~/.claude/skills/archon-reaper/scripts/render_report.py <scratchpad>/stats.json <scratchpad>/archon-report.html --narrative <scratchpad>/narrative.json
+   python -I ~/.claude/skills/archon-reaper/scripts/improve_prompt.py <scratchpad>/stats.json --narrative <scratchpad>/narrative.json --out <scratchpad>/improve-prompt.md
    ```
+
+   The report already carries the prompt, with a Copy button, in "Improve your process"; the `.md` file is the same
+   text for use outside the page.
 
 4. **Publish** `archon-report.html` with the Artifact tool. Load the `artifact-design` skill first, as the Artifact tool
    requires, but do not redesign the page: the renderer already follows its contract (tokens, light and dark themes,
@@ -69,18 +86,33 @@ Two scripts do the numbers and the layout; you add the judgment (the narrative).
    To refresh an earlier report, publish to the same file path so the URL is kept.
 
 5. **Reply** with the link and three or four lines: the headline numbers, the single biggest problem, and the top
-   recommendation. Do not paste the report.
+   recommendation. Say that "Improve your process" holds a prompt to paste into a new Claude session, and give the
+   full path of `improve-prompt.md`. Do not paste the report or the prompt.
 
 ## What the report contains
 
-KPI strip (runs, completed, failed, cancelled, success rate, spend) and an outcome bar; takeaways; per-workflow table
+KPI strip (runs, completed, failed, cancelled, success rate, spend) and an outcome bar; takeaways; recommended changes,
+each with its reasoning, evidence, pros and cons (shown when the narrative gives more than the action); "Improve your
+process", the copy-paste prompt; per-workflow table
 (runs, outcome mix, success, average, median, spend); Archon versions (runs, outcomes, time and spend per version, dated
 version changes, success by workflow and version; shown when the runs cover more than one version or the install has
 changed version); failure groups with example errors and the versions they occurred on; nodes that fail most;
 cancellation reasons; duration (average, median, p90, hands-on vs total, slowest runs, slowest nodes); spend by workflow
 and model with the share spent on failed or cancelled runs; approvals, resumes and loop iterations; activity over time
 with version changes marked; projects; tool calls; installation health (DB size, workspaces, unfinished runs, installed
-version and whether a newer one is available).
+version and whether a newer one is available); and last, a KPI summary table for agents: one row per figure with a
+stable `snake_case` key, the raw value, its unit and its meaning, also embedded as JSON in
+`<script type="application/json" id="kpi-summary-data">`.
+
+## The improvement prompt
+
+`improve_prompt.py` builds it from `stats.json` and the narrative, so the same input gives the same text. It holds:
+the evidence (failure groups costliest first, with up to three example errors each and their run ids, the nodes that
+fail most, the workflows and projects, and the KPI summary); the narrative's diagnoses and recommendations, labelled as
+hypotheses to confirm; and a brief that has the receiving session map the user's development system (CLAUDE.md,
+AGENTS.md, skills, plugins and hooks, Archon workflows at their source, checks), confirm each cause from the run logs,
+put the fix at the layer that owns it, and show a plan with diffs, reasoning, pros and cons before changing anything.
+It forbids writing to the database, launching or resuming runs, and touching secrets.
 
 ## Definitions (keep consistent when you write the narrative)
 
@@ -107,6 +139,8 @@ version and whether a newer one is available).
 ## Extending
 
 - A new metric goes in `collect_stats.py` (add a key to the JSON) and a section function in `render_report.py`.
+  A figure agents should read also gets a row in `kpi_summary()` in `improve_prompt.py`; its key is part of the
+  table's contract (`archon-reaper.kpi-summary/1`), so rename or remove a key only with a new schema number.
 - The `hook_activity` events are skipped on purpose (about 87% of all events and no reporting value).
 - A new source of version evidence is one more `(datetime, version, source)` tuple in `version_observations()`.
 - The database is opened with `mode=ro`. Never write to it. For anything the DB lacks, the per-run JSONL logs live in
